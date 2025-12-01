@@ -1,0 +1,49 @@
+# docker-compose.yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: simple_agent_db
+    environment:
+      POSTGRES_DB: simple_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      # 挂载自定义配置文件
+      - ./db/postgres.conf:/etc/postgresql/postgresql.conf
+      # 挂载数据目录
+      - postgres_data:/var/lib/postgresql/data
+    # 使用自定义配置启动 PG
+    command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d simple_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  electric:
+    image: electricsql/electric:canary
+    container_name: simple_agent_electric
+    environment:
+      # 连接到上面的 postgres 服务
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/simple_agent?sslmode=disable
+      # 开发模式下允许不安全的连接
+      ELECTRIC_INSECURE: true
+      # 服务 ID (任意字符串)
+      ELECTRIC_SERVICE_ID: simple_agent_service
+      # 写入 Postgres 的 HTTP API 端口 (默认 3000)
+      HTTP_PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+# 如果需要网络隔离可以定义，这里直接使用默认 bridge
+volumes:
+  postgres_data:
+    # driver: local (这是默认值，可以省略)
+    # 命名卷是 Docker 推荐的持久化数据方式，因为它通常性能更好，
+    # 并且在 Linux 上不需要担心权限问题。
