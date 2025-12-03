@@ -64,7 +64,22 @@ BEGIN
 END;
 $$;
 
--- RPC 4: 提交最终报告 (供 Worker Aggregator 使用)
+-- RPC 4: 更新子任务内容
+CREATE OR REPLACE PROCEDURE update_subtask_temporary_state(
+    p_subtask_id UUID,
+    p_current TEXT
+)
+    LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE sub_tasks
+    SET result_content = p_current,
+        updated_at = NOW()
+    WHERE id = p_subtask_id;
+END;
+$$;
+
+-- RPC 5: 提交最终报告 (供 Worker Aggregator 使用)
 CREATE OR REPLACE PROCEDURE submit_final_report(
     p_request_id UUID,
     p_report TEXT
@@ -75,6 +90,21 @@ BEGIN
     UPDATE requests
     SET final_report = p_report,
         status = 'completed',
+        updated_at = NOW()
+    WHERE id = p_request_id;
+END;
+$$;
+
+-- RPC 6: 更新最终报告
+CREATE OR REPLACE PROCEDURE update_temporary_final_report(
+    p_request_id UUID,
+    p_report TEXT
+)
+    LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE requests
+    SET final_report = p_report,
         updated_at = NOW()
     WHERE id = p_request_id;
 END;

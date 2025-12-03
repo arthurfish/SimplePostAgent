@@ -69,11 +69,19 @@ const makeDbImpl = (sql: postgres.Sql) => ({
     Effect.tryPromise(() =>
       sql`CALL submit_subtask_result(${taskId}, ${result})`
     ),
-
+    updateSubtaskTemporaryState: (taskId: string, result: string) =>
+        Effect.tryPromise(() =>
+            sql`CALL update_subtask_temporary_state(${taskId}, ${result})`
+        ),
   submitFinalReport: (requestId: string, report: string) =>
     Effect.tryPromise(() =>
       sql`CALL submit_final_report(${requestId}, ${report})`
     ),
+
+    updateTemporaryFinalReport: (requestId: string, report: string) =>
+        Effect.tryPromise(() =>
+            sql`CALL update_temporary_final_report(${requestId}, ${report})`
+        ),
   markRequestFailed: (requestId: string, error: string) =>
     Effect.tryPromise(() =>
       sql`CALL submit_request_failure(${requestId}, ${error})`
