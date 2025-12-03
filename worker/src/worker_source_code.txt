@@ -1,0 +1,484 @@
+import {Context, Effect} from "effect";
+
+export class LLMService extends Context.Tag("LLMService")<
+    LLMService,
+    {
+        plan: (input: string) => Effect.Effect<any[], Error>;
+        execute: (prompt: string, updateFn: (state: string) => Effect.Effect<void, never>) => Effect.Effect<string, Error>;
+        aggregate: (results: { task_title: string; result_content: string }[], updateFn: ((state: string) => Effect.Effect<void, never>)) => Effect.Effect<string, Error>;
+    }
+>() {}// src/db.ts
+import postgres from "postgres";
+import { Effect, Context, Layer, Config } from "effect";
+import {Console} from "effect/Console";
+
+// 定义服务接口 (Tag)
+export class Database extends Context.Tag("Database")<
+  Database,
+  ReturnType<typeof makeDbImpl>
+>() {}
+
+// 实现
+const makeDbImpl = (sql: postgres.Sql) => ({
+  // 1. 获取待拆解的任务 (Planner Job)
+  // SKIP LOCKED 是关键: 它会跳过被其他事务锁定的行
+  fetchPendingRequests: () =>
+    Effect.tryPromise(() =>
+      sql`
+        SELECT id, user_input 
+        FROM requests 
+        WHERE status = 'pending' 
+        FOR UPDATE SKIP LOCKED 
+        LIMIT 5
+      `
+    ),
+
+  // 2. 获取待执行的子任务 (Executor Job)
+  fetchPendingSubTasks: () =>
+    Effect.tryPromise(() =>
+      sql`
+        SELECT id, prompt_content 
+        FROM sub_tasks 
+        WHERE status = 'pending' 
+        FOR UPDATE SKIP LOCKED 
+        LIMIT 10
+      `
+    ),
+
+  // 3. 获取待汇总的任务 (Aggregator Job)
+  fetchAggregatingRequests: () =>
+    Effect.tryPromise(() =>
+      sql`
+        SELECT id 
+        FROM requests 
+        WHERE status = 'aggregating' 
+        FOR UPDATE SKIP LOCKED 
+        LIMIT 5
+      `
+    ),
+    
+  // 4. 获取某个 Request 的所有已完成子任务结果 (用于汇总)
+  fetchCompletedSubTasks: (requestId: string) =>
+    Effect.tryPromise(() =>
+        sql`
+            SELECT task_title, result_content 
+            FROM sub_tasks 
+            WHERE request_id = ${requestId} AND status = 'completed'
+        `
+    ),
+
+  // --- RPC 调用封装 (与 Phase 1 定义的存储过程一致) ---
+
+  submitPlan: (requestId: string, planJson: any) =>
+    Effect.tryPromise(() =>
+      sql`CALL submit_plan(${requestId}, ${sql.json(planJson)})`
+    ),
+
+  submitSubTaskResult: (taskId: string, result: string) =>
+    Effect.tryPromise(() =>
+      sql`CALL submit_subtask_result(${taskId}, ${result})`
+    ),
+    updateSubtaskTemporaryState: (taskId: string, result: string) =>
+        Effect.tryPromise(() =>
+            sql`CALL update_subtask_temporary_state(${taskId}, ${result})`
+        ),
+  submitFinalReport: (requestId: string, report: string) =>
+    Effect.tryPromise(() =>
+      sql`CALL submit_final_report(${requestId}, ${report})`
+    ),
+
+    updateTemporaryFinalReport: (requestId: string, report: string) =>
+        Effect.tryPromise(() =>
+            sql`CALL update_temporary_final_report(${requestId}, ${report})`
+        ),
+  markRequestFailed: (requestId: string, error: string) =>
+    Effect.tryPromise(() =>
+      sql`CALL submit_request_failure(${requestId}, ${error})`
+    ),
+
+  markSubTaskFailed: (taskId: string, error: string) =>
+    Effect.tryPromise(() =>
+      sql`CALL submit_subtask_failure(${taskId}, ${error})`
+    ),
+});
+
+// Layer 定义
+export const DatabaseLive = Layer.effect(
+  Database,
+  Effect.gen(function* () {
+    const url = yield* Config.string("DATABASE_URL").pipe(
+        Config.withDefault("postgres://postgres:password@localhost:5432/simple_agent")
+    );
+    const sql = postgres(url, { transform: { undefined: null } });
+    return makeDbImpl(sql);
+  })
+);
+// src/index.ts
+import { Effect, Schedule, Layer } from "effect";
+import { NodeRuntime } from "@effect/platform-node";
+import { DatabaseLive } from "./db";
+import { VolcanoLLM } from "./real_llm";
+import {MockLLM} from "./llm"
+import { runPlanner, runExecutor, runAggregator } from "./workflow";
+
+// 主循环策略
+const schedulePolicy = Schedule.spaced("1 seconds"); // 每秒轮询一次
+
+const mainLoop = Effect.gen(function* () {
+  yield* Effect.log("🚀 SimplePostAgent Worker Started");
+
+  // 我们可以让三个 Loop 并行运行，互不阻塞
+  const plannerLoop = runPlanner.pipe(Effect.repeat(schedulePolicy));
+  const executorLoop = runExecutor.pipe(Effect.repeat(schedulePolicy));
+  const aggregatorLoop = runAggregator.pipe(Effect.repeat(schedulePolicy));
+
+  // 组合并运行 (永远不会结束，除非被 Kill)
+  yield* Effect.all([plannerLoop, executorLoop, aggregatorLoop], { concurrency: "unbounded" });
+});
+
+// 依赖注入
+const program = mainLoop.pipe(
+  Effect.provide(DatabaseLive),
+  Effect.provide(VolcanoLLM)
+);
+
+NodeRuntime.runMain(program);
+// src/llm.ts
+import { Effect, Context, Layer, Schedule, Random } from "effect";
+
+export class LLMService extends Context.Tag("LLMService")<
+  LLMService,
+  {
+    plan: (input: string) => Effect.Effect<any[], Error>;
+    execute: (prompt: string) => Effect.Effect<string, Error>;
+    aggregate: (results: { task_title: string; result_content: string }[]) => Effect.Effect<string, Error>;
+  }
+>() {}
+
+export const MockLLM = Layer.succeed(LLMService, {
+  // Planner: 永远把任务拆成 3 个
+  plan: (input) =>
+    Effect.gen(function* () {
+      yield* Effect.log(`[MockLLM] Planning for: "${input}"`);
+      yield* Effect.sleep("1 seconds"); // 思考时间
+      return [
+        { title: "Step 1: Research", prompt: `Research: ${input}` },
+        { title: "Step 2: Analysis", prompt: `Analyze: ${input}` },
+        { title: "Step 3: Conclusion", prompt: `Conclude: ${input}` },
+      ];
+    }),
+
+  // Executor: 模拟执行，带有随机失败
+  execute: (prompt) =>
+    Effect.gen(function* () {
+      yield* Effect.log(`[MockLLM] Executing: "${prompt}"`);
+      
+      // 模拟 20% 的概率失败 (测试重试机制)
+      if (Math.random() < 0.2) {
+          yield* Effect.fail(new Error("Random API Failure (Simulated)"));
+      }
+      if (prompt.includes("poison")) {
+          // 模拟一个非预期错误（Defect）
+          yield* Effect.die(new Error("FATAL POISON PILL ERROR"));
+      }
+      yield* Effect.sleep("2 seconds"); // 模拟耗时
+      return `Result for [${prompt}]: Lorem ipsum data...`;
+    }),
+
+  // Aggregator: 简单的文本拼接
+  aggregate: (results) =>
+    Effect.gen(function* () {
+      yield* Effect.log(`[MockLLM] Aggregating ${results.length} results`);
+      yield* Effect.sleep("1 seconds");
+      const summary = results
+        .map((r) => `## ${r.task_title}\n${r.result_content}`)
+        .join("\n\n");
+      return `# Final Report\n\n${summary}`;
+    }),
+});
+
+
+
+// src/llm.ts
+import { Effect, Context, Layer } from "effect";
+
+// 保持这个 Service Tag 接口不变，这是我们对外的契约
+export class LLMService extends Context.Tag("LLMService")<
+    LLMService,
+    {
+        plan: (input: string) => Effect.Effect<any[], Error>;
+        execute: (prompt: string) => Effect.Effect<string, Error>;
+        aggregate: (results: { task_title: string; result_content: string }[]) => Effect.Effect<string, Error>;
+    }
+>() {}
+
+/**
+ * 一个通用的辅助函数，用于调用火山引擎大模型 API
+ * @param messages - 发送给模型的对话消息列表
+ * @param response_format - 可选，用于指定模型返回的格式 (例如 JSON)
+ * @returns Effect.Effect<string, Error> - 返回模型的文本响应
+ */
+const callVolcanoAPI = (messages: object[], response_format?: object): Effect.Effect<string, Error> =>
+    Effect.gen(function* () {
+        const apiKey = process.env.ARK_API_KEY;
+        if (!apiKey) {
+            return yield* Effect.fail(new Error("ARK_API_KEY 环境变量未设置，请检查。"));
+        }
+
+        const body = {
+            model: "doubao-seed-1-6-flash-250828", // 使用一个比较通用的模型
+            messages,
+            ...response_format,
+        };
+
+        const response = yield* Effect.tryPromise({
+            try: () => fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify(body),
+            }),
+            catch: (error) => new Error(`网络请求失败: ${error instanceof Error ? error.message : String(error)}`),
+        });
+
+        if (!response.ok) {
+            const errorText = yield* Effect.promise(() => response.text());
+            return yield* Effect.fail(new Error(`API 请求失败: ${response.status} ${response.statusText} - ${errorText}`));
+        }
+
+        const json = (yield* Effect.promise(() => response.json())) as any;
+
+        // 检查返回的数据结构是否符合预期
+        if (!json.choices || json.choices.length === 0 || !json.choices[0].message) {
+            return yield* Effect.fail(new Error("API 返回了非预期的格式。"));
+        }
+
+        return json.choices[0].message.content;
+    });
+
+// 这是 LLMService 的真实火山引擎实现
+export const VolcanoLLM = Layer.succeed(LLMService, {
+    // Planner: 调用模型，让它把任务拆解成 JSON 格式的步骤
+    plan: (input) => Effect.gen(function* () {
+        yield* Effect.log(`[VolcanoLLM] Planning for: "${input}"`);
+
+        const messages = [
+            {
+                role: "system",
+                content: "根据用户的请求，将这个问题的回答划分为相关的子问题，分而治之进行解决。请严格按照指定的 JSON 格式返回计划。",
+            },
+            {
+                role: "user",
+                content: input,
+            },
+        ];
+
+        // 定义我们期望模型返回的 JSON 结构
+        const response_format = {
+            response_format: {
+                type: "json_schema",
+                json_schema: {
+                    name: "task_plan",
+                    schema: {
+                        type: "object",
+                        properties: {
+                            tasks: {
+                                type: "array",
+                                items: {
+                                    type: "object",
+                                    properties: {
+                                        title: { type: "string", description: "任务的简短标题" },
+                                        prompt: { type: "string", description: "执行该任务所需的详细指令或问题" },
+                                    },
+                                    required: ["title", "prompt"],
+                                },
+                            },
+                        },
+                        required: ["tasks"],
+                    },
+                    strict: true,
+                },
+            },
+        };
+
+        // 调用 API 并期望返回一个 JSON 字符串
+        const jsonString = yield* callVolcanoAPI(messages, response_format);
+
+
+        // 解析 JSON 字符串
+        const result = yield* Effect.try({
+            try: () => JSON.parse(jsonString),
+            catch: (error) => new Error(`解析 Plan 返回的 JSON 失败: ${error instanceof Error ? error.message : String(error)}`)
+        }).pipe(
+            //Effect.tap(x => console.log(x))
+        );
+
+        // 从解析后的结果中提取 tasks 数组
+        if (!result.tasks || !Array.isArray(result.tasks)) {
+            return yield* Effect.fail(new Error("Plan 返回的 JSON 格式不正确，缺少 'tasks' 数组。"));
+        }
+
+        return result.tasks;
+    }),
+
+    // Executor: 直接执行一个 prompt，返回文本结果
+    execute: (prompt) => Effect.gen(function* () {
+        yield* Effect.log(`[VolcanoLLM] Executing: "${prompt}"`);
+
+        const messages = [
+            {
+                role: "system",
+                content: "请尽可能详细，深度的完成用户指定的任务。",
+            },
+            {
+                role: "user",
+                content: prompt,
+            },
+        ];
+
+        return yield* callVolcanoAPI(messages);
+    }),
+
+    // Aggregator: 将多个任务的结果汇总成一份最终报告
+    aggregate: (results) => Effect.gen(function* () {
+        yield* Effect.log(`[VolcanoLLM] Aggregating ${results.length} results`);
+
+        // 将所有子任务的结果格式化成一个大的 prompt
+        const combinedResults = results
+            .map((r) => `## 任务: ${r.task_title}\n\n结果:\n${r.result_content}`)
+            .join("\n\n---\n\n");
+
+        const messages = [
+            {
+                role: "system",
+                content: "你是一个报告撰写专家。请根据以下分步任务的结果，整合并生成一份清晰、连贯的最终综合报告。不要包含任务的原始标题和内容，而是将它们自然地融合到报告中。",
+            },
+            {
+                role: "user",
+                content: `请基于以下内容生成最终报告：\n\n${combinedResults}`,
+            },
+        ];
+
+        return yield* callVolcanoAPI(messages);
+    }),
+});// worker/src/workflow.ts
+import { Effect, Schedule, pipe, Cause } from "effect";
+import { Database } from "./db";
+import { LLMService } from "./real_llm";
+
+// 辅助函数：处理单个 Job 的生命周期，确保它要么成功，要么被标记为 Failed
+const handleJob = <E>(
+  jobId: string,
+  taskName: string,
+  logic: Effect.Effect<void, E, Database | LLMService>,
+  onFail: (db: any, errorMsg: string) => Effect.Effect<void>
+) =>
+  Effect.gen(function* () {
+    const db = yield* Database;
+
+    // 运行业务逻辑，捕获所有可能的错误（包括缺陷 Defect）
+    const exit = yield* logic.pipe(Effect.exit);
+
+    if (exit._tag === "Failure") {
+      // 解析错误信息
+      const errorMsg = Cause.pretty(exit.cause);
+      yield* Effect.logError(`[${taskName}] Job ${jobId} CRASHED: ${errorMsg}`);
+      
+      // ★★★ 关键点：写入数据库失败状态，打破死循环 ★★★
+      // 这里如果不成功（比如数据库挂了），我们也无能为力，只能让它 crash
+      yield* onFail(db, errorMsg);
+    }
+  });
+
+// ------------------------------------------------------------------
+// 1. Planner Workflow (Robust)
+// ------------------------------------------------------------------
+export const runPlanner = Effect.gen(function* () {
+  const db = yield* Database;
+  const llm = yield* LLMService;
+
+  const jobs = yield* db.fetchPendingRequests();
+  if (jobs.length === 0) return;
+
+  yield* Effect.forEach(
+    jobs,
+    (job) =>
+      handleJob(
+        job.id,
+        "Planner",
+        Effect.gen(function* () {
+          const plan = yield* llm.plan(job.user_input);
+          yield* db.submitPlan(job.id, plan);
+          yield* Effect.log(`[Planner] Plan submitted for ${job.id}`);
+        }),
+        // 失败回调
+        (db, msg) => db.markRequestFailed(job.id, msg)
+      ),
+    { concurrency: 5 }
+  );
+});
+
+// ------------------------------------------------------------------
+// 2. Executor Workflow (Robust)
+// ------------------------------------------------------------------
+export const runExecutor = Effect.gen(function* () {
+  const db = yield* Database;
+  const llm = yield* LLMService;
+
+  const tasks = yield* db.fetchPendingSubTasks();
+  if (tasks.length === 0) return;
+
+  yield* Effect.forEach(
+    tasks,
+    (task) =>
+      handleJob(
+        task.id,
+        "Executor",
+        Effect.gen(function* () {
+          // 这里可以是更复杂的重试逻辑
+          const result = yield* llm.execute(task.prompt_content).pipe(
+            Effect.retry({
+              schedule: Schedule.exponential("500 millis").pipe(
+                Schedule.intersect(Schedule.recurs(3)) // 最多重试3次
+              ),
+            })
+          );
+          yield* db.submitSubTaskResult(task.id, result);
+          yield* Effect.log(`[Executor] Task ${task.id} done`);
+        }),
+        // 失败回调：这会触发数据库 Trigger，导致整个 Request 失败
+        (db, msg) => db.markSubTaskFailed(task.id, msg)
+      ),
+    { concurrency: 20 }
+  );
+});
+
+// ------------------------------------------------------------------
+// 3. Aggregator Workflow (Robust)
+// ------------------------------------------------------------------
+export const runAggregator = Effect.gen(function* () {
+  const db = yield* Database;
+  const llm = yield* LLMService;
+
+  const jobs = yield* db.fetchAggregatingRequests();
+  if (jobs.length === 0) return;
+
+  yield* Effect.forEach(
+    jobs,
+    (job) =>
+      handleJob(
+        job.id,
+        "Aggregator",
+        Effect.gen(function* () {
+          const subTasks = yield* db.fetchCompletedSubTasks(job.id);
+          const report = yield* llm.aggregate(subTasks as any);
+          yield* db.submitFinalReport(job.id, report);
+          yield* Effect.log(`[Aggregator] Report generated for ${job.id}`);
+        }),
+        (db, msg) => db.markRequestFailed(job.id, msg)
+      ),
+    { concurrency: 2 }
+  );
+});

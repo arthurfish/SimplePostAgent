@@ -1,0 +1,389 @@
+-- db/api_interface.sql
+
+-- 1. 定义一个辅助函数，方便从 Node.js 传入的配置中获取 User ID
+-- 如果没有设置（比如测试环境忘记设），则抛出错误，防止数据污染
+CREATE OR REPLACE FUNCTION get_auth_uid() RETURNS UUID AS $$
+DECLARE
+    v_uid text;
+BEGIN
+    v_uid := current_setting('app.current_user_id', true);
+    IF v_uid IS NULL OR v_uid = '' THEN
+        RAISE EXCEPTION 'Access Denied: User ID not set in session context';
+    END IF;
+    RETURN v_uid::UUID;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 2. API 专用：创建请求
+-- 这是一个 FUNCTION，不是 PROCEDURE，方便返回新生成的 ID
+CREATE OR REPLACE FUNCTION api_create_request(p_input TEXT)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_user_id UUID;
+    v_new_id UUID;
+BEGIN
+    -- 获取身份 (利用上面的辅助函数)
+    v_user_id := get_auth_uid();
+    
+    INSERT INTO requests (user_id, user_input, status)
+    VALUES (v_user_id, p_input, 'pending')
+    RETURNING id INTO v_new_id;
+    
+    RETURN v_new_id;
+END;
+$$;
+
+-- 3. 确保之前的 RLS 策略能读取到这个设置
+-- (Phase 1 已经做过，这里确认一下逻辑闭环)
+-- ALTER DATABASE simple_agent SET "app.current_user_id" TO '';
+-- db/auth_schema.sql
+
+-- 1. 启用加密扩展 (如果之前没启用)
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- 2. 创建用户表
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL, -- 存储 bcrypt 哈希
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 3. 开启 RLS (虽然目前我们主要通过 API 访问，但这是好习惯)
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+
+-- 4. 辅助函数：创建用户 (供管理员手动调用)
+-- 使用: SELECT create_user('admin', '123456');
+CREATE OR REPLACE FUNCTION create_user(p_username TEXT, p_password TEXT)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID;
+BEGIN
+    INSERT INTO users (username, password_hash)
+    VALUES (p_username, crypt(p_password, gen_salt('bf'))) -- 使用 bcrypt
+    RETURNING id INTO v_id;
+    return v_id;
+END;
+$$;
+
+-- 5. 辅助函数：验证用户 (供 API 调用)
+-- 如果验证成功返回 user_id，失败返回 NULL
+CREATE OR REPLACE FUNCTION verify_user(p_username TEXT, p_password TEXT)
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id UUID;
+    v_hash TEXT;
+BEGIN
+    SELECT id, password_hash INTO v_id, v_hash
+    FROM users
+    WHERE username = p_username;
+
+    IF v_id IS NOT NULL AND v_hash = crypt(p_password, v_hash) THEN
+        RETURN v_id;
+    ELSE
+        RETURN NULL;
+    END IF;
+END;
+$$;
+-- db/error_handling.sql
+
+-- 1. RPC: 标记子任务失败
+CREATE OR REPLACE PROCEDURE submit_subtask_failure(
+    p_subtask_id UUID,
+    p_error_message TEXT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE sub_tasks
+    SET status = 'failed',
+        result_content = 'ERROR: ' || p_error_message,
+        updated_at = NOW()
+    WHERE id = p_subtask_id;
+END;
+$$;
+
+-- 2. RPC: 标记主任务失败
+CREATE OR REPLACE PROCEDURE submit_request_failure(
+    p_request_id UUID,
+    p_error_message TEXT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE requests
+    SET status = 'failed',
+        final_report = 'SYSTEM ERROR: ' || p_error_message,
+        updated_at = NOW()
+    WHERE id = p_request_id;
+END;
+$$;
+
+-- 3. 触发器：级联失败 (Cascade Failure)
+-- 如果任何一个子任务变成了 'failed'，立即将主任务也标记为 'failed'，停止后续流程。
+CREATE OR REPLACE FUNCTION trigger_cascade_failure()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.status = 'failed' AND OLD.status != 'failed' THEN
+        UPDATE requests
+        SET status = 'failed',
+            final_report = 'Task execution failed. See sub-tasks for details.',
+            updated_at = NOW()
+        WHERE id = NEW.request_id AND status != 'failed'; -- 防止重复更新
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_subtask_failure ON sub_tasks;
+CREATE TRIGGER trigger_subtask_failure
+AFTER UPDATE ON sub_tasks
+FOR EACH ROW
+EXECUTE FUNCTION trigger_cascade_failure();
+# db/postgres.conf
+
+# 监听所有 IP
+listen_addresses = '*'
+
+# 开启逻辑复制 (Electric 必须)
+wal_level = logical
+
+# 默认设置优化（可选）
+max_connections = 100
+shared_buffers = 128MB
+dynamic_shared_memory_type = posix
+-- db/procedures.sql
+
+-- RPC 1: 创建请求 (供 API 使用)
+CREATE OR REPLACE PROCEDURE create_request(
+    p_user_id UUID, 
+    p_input TEXT,
+    INOUT p_new_id UUID DEFAULT NULL -- 返回新生成的 ID
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO requests (user_id, user_input, status)
+    VALUES (p_user_id, p_input, 'pending')
+    RETURNING id INTO p_new_id;
+END;
+$$;
+
+-- RPC 2: 提交计划 (供 Worker Planner 使用)
+-- 接收 JSON 数组: [{"title": "...", "prompt": "..."}, ...]
+CREATE OR REPLACE PROCEDURE submit_plan(
+    p_request_id UUID,
+    p_tasks_json JSONB
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    task_item JSONB;
+    v_user_id uuid;
+BEGIN
+    -- 1. 插入所有子任务
+    SELECT user_id into v_user_id from requests where id = p_request_id;
+    FOR task_item IN SELECT * FROM jsonb_array_elements(p_tasks_json)
+    LOOP
+        INSERT INTO sub_tasks (request_id, task_title, prompt_content, status, user_id)
+        VALUES (
+            p_request_id, 
+            task_item->>'title', 
+            task_item->>'prompt', 
+            'pending',
+            v_user_id
+        );
+    END LOOP;
+
+    -- 2. 更新主状态
+    UPDATE requests 
+    SET status = 'processing', updated_at = NOW()
+    WHERE id = p_request_id;
+END;
+$$;
+
+-- RPC 3: 提交子任务结果 (供 Worker Executor 使用)
+CREATE OR REPLACE PROCEDURE submit_subtask_result(
+    p_subtask_id UUID,
+    p_result TEXT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE sub_tasks
+    SET result_content = p_result,
+        status = 'completed',
+        updated_at = NOW()
+    WHERE id = p_subtask_id;
+END;
+$$;
+
+-- RPC 4: 更新子任务内容
+CREATE OR REPLACE PROCEDURE update_subtask_temporary_state(
+    p_subtask_id UUID,
+    p_current TEXT
+)
+    LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE sub_tasks
+    SET result_content = p_current,
+        updated_at = NOW()
+    WHERE id = p_subtask_id;
+END;
+$$;
+
+-- RPC 5: 提交最终报告 (供 Worker Aggregator 使用)
+CREATE OR REPLACE PROCEDURE submit_final_report(
+    p_request_id UUID,
+    p_report TEXT
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE requests
+    SET final_report = p_report,
+        status = 'completed',
+        updated_at = NOW()
+    WHERE id = p_request_id;
+END;
+$$;
+
+-- RPC 6: 更新最终报告
+CREATE OR REPLACE PROCEDURE update_temporary_final_report(
+    p_request_id UUID,
+    p_report TEXT
+)
+    LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE requests
+    SET final_report = p_report,
+        updated_at = NOW()
+    WHERE id = p_request_id;
+END;
+$$;
+-- db/rls.sql
+
+-- 开启 RLS
+ALTER TABLE requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sub_tasks ENABLE ROW LEVEL SECURITY;
+
+-- 策略 1: 用户只能看到自己的请求
+CREATE POLICY requests_isolation_policy ON requests
+    FOR ALL
+    USING (user_id = current_setting('app.current_user_id', true)::uuid);
+
+-- 策略 2: 用户只能看到属于自己请求的子任务
+CREATE POLICY sub_tasks_isolation_policy ON sub_tasks
+    FOR ALL
+    USING (
+        request_id IN (
+            SELECT id FROM requests 
+            WHERE user_id = current_setting('app.current_user_id', true)::uuid
+        )
+    );
+-- db/schema.sql
+
+-- 启用 UUID 生成扩展
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- 定义枚举类型
+CREATE TYPE request_status AS ENUM (
+    'pending',      -- 等待处理
+    'processing',   -- 正在拆解/执行子任务
+    'aggregating',  -- 子任务完成，正在汇总
+    'completed',    -- 全部完成
+    'failed'        -- 失败
+);
+
+CREATE TYPE task_status AS ENUM (
+    'pending',      -- 等待执行
+    'completed',    -- 执行完毕
+    'failed'        -- 执行失败
+);
+
+-- 1. 主请求表
+CREATE TABLE IF NOT EXISTS requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    user_input TEXT NOT NULL,
+    final_report TEXT,
+    status request_status DEFAULT 'pending',
+    metadata JSONB DEFAULT '{}'::jsonb, -- 存放如 token消耗、模型配置等
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 2. 子任务表
+CREATE TABLE IF NOT EXISTS sub_tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID REFERENCES requests(id) ON DELETE CASCADE,
+    task_title VARCHAR(255),
+    prompt_content TEXT NOT NULL,
+    result_content TEXT,
+    status task_status DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    user_id uuid NOT NULL
+);
+
+-- Electric 必须配置：开启全量复制标识
+ALTER TABLE requests REPLICA IDENTITY FULL;
+ALTER TABLE sub_tasks REPLICA IDENTITY FULL;
+
+-- 创建索引以加速查询
+CREATE INDEX IF NOT EXISTS idx_requests_user_id ON requests(user_id);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);
+CREATE INDEX IF NOT EXISTS idx_sub_tasks_request_id ON sub_tasks(request_id);
+CREATE INDEX IF NOT EXISTS idx_sub_tasks_status ON sub_tasks(status);
+-- db/triggers.sql
+
+-- 触发器函数
+CREATE OR REPLACE FUNCTION check_and_trigger_aggregation()
+RETURNS TRIGGER AS $$
+DECLARE
+    pending_count INTEGER;
+    parent_status request_status;
+BEGIN
+    -- 仅当子任务变更为 completed 时执行
+    IF NEW.status = 'completed' AND OLD.status != 'completed' THEN
+        
+        -- 1. 检查该请求是否还有其他未完成的子任务
+        SELECT count(*) INTO pending_count
+        FROM sub_tasks
+        WHERE request_id = NEW.request_id AND status != 'completed';
+
+        -- 2. 如果没有待处理的任务 (count = 0)
+        IF pending_count = 0 THEN
+            -- 检查父任务当前状态，避免重复触发
+            SELECT status INTO parent_status FROM requests WHERE id = NEW.request_id;
+            
+            IF parent_status = 'processing' THEN
+                -- 3. 自动将主任务推向 'aggregating'
+                UPDATE requests
+                SET status = 'aggregating', updated_at = NOW()
+                WHERE id = NEW.request_id;
+            END IF;
+        END IF;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 绑定触发器
+DROP TRIGGER IF EXISTS trigger_check_aggregation ON sub_tasks;
+CREATE TRIGGER trigger_check_aggregation
+AFTER UPDATE ON sub_tasks
+FOR EACH ROW
+EXECUTE FUNCTION check_and_trigger_aggregation();
+create or replace view sub_tasks_with_userid as
+select request_id, task_title, prompt_content, result_content, r.status as status, r.created_at as created_at, r.updated_at as updated_at, user_id
+from sub_tasks s inner join requests r on s.request_id = r.id
