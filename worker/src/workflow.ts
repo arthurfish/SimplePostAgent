@@ -68,9 +68,9 @@ export const runExecutor = Effect.gen(function* () {
                     // 使用 Effect.catchAll 来忽略更新失败，这确保了即使中间某次更新出错，
                     // 也不会中断整个 LLM 的生成过程。
                     const updateFn = (currentState: string) =>
-                        db.updateSubtaskTemporaryState(task.id, currentState).pipe(
+                        Effect.all([db.updateSubtaskTemporaryState(task.id, currentState).pipe(
                             Effect.catchAll(() => Effect.void) // 关键：忽略流式更新的错误
-                        );
+                        ), Effect.log(`instant update: ${currentState}`)]);
 
                     // 调用 llm.execute 并传入 updateFn
                     const result = yield* llm.execute(task.prompt_content, updateFn).pipe(
@@ -129,6 +129,6 @@ export const runAggregator = Effect.gen(function* () {
                 }),
                 (db, msg) => db.markRequestFailed(job.id, msg)
             ),
-        { concurrency: 2 }
+        { concurrency: 20 }
     );
 });
