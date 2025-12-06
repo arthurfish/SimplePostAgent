@@ -1,11 +1,14 @@
 // src/components/requests/NewRequestForm.tsx
 import { useState } from "react";
 import { Effect } from "effect";
-import { Button } from "../ui/Button";
-import { Textarea } from "../ui/Textarea";
-import { Card } from "../ui/Card";
 import { Spinner } from "../ui/Spinner";
-import {useApiService} from "../AppProvider.tsx";
+import { useApiService } from "../AppProvider.tsx";
+
+const PaperPlaneIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>
+    </svg>
+);
 
 export const NewRequestForm = () => {
     const [input, setInput] = useState("");
@@ -15,13 +18,13 @@ export const NewRequestForm = () => {
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (!input.trim()) return;
+        if (!input.trim() || isLoading) return;
 
         setIsLoading(true);
         setError(null);
 
         const program = apiService.createRequest(input).pipe(
-            Effect.tap(() => Effect.sync(() => setInput(""))), // 清空输入框
+            Effect.tap(() => Effect.sync(() => setInput(""))),
             Effect.catchAll((e) => Effect.sync(() => setError(e.message))),
             Effect.ensuring(Effect.sync(() => setIsLoading(false)))
         );
@@ -30,23 +33,30 @@ export const NewRequestForm = () => {
     };
 
     return (
-        <Card>
-            <form onSubmit={handleSubmit} className="space-y-4">
-                <h3 className="text-lg font-medium">Create a New AI Request</h3>
-                <Textarea
-                    rows={4}
-                    placeholder="Enter your complex request here..."
+        <div className="w-full max-w-[650px]">
+            <form onSubmit={handleSubmit} className="flex items-stretch gap-4">
+                <input
+                    type="text"
+                    placeholder="请输入您的任务..."
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     disabled={isLoading}
+                    className="flex-grow p-4 text-[#888] bg-[#E8E8E8] rounded-sm placeholder:text-[#AFAFAF] focus:outline-none focus:ring-1 focus:ring-gray-300 shadow-sm text-lg"
                 />
-                <div className="flex justify-end items-center">
-                    {error && <p className="text-red-500 text-sm mr-4">{error}</p>}
-                    <Button type="submit" disabled={isLoading}>
-                        {isLoading ? <Spinner size="sm" /> : "Submit Request"}
-                    </Button>
-                </div>
+                <button
+                    type="submit"
+                    disabled={isLoading}
+                    className="flex items-center justify-center gap-2 px-8 bg-gradient-to-br from-[#E58C84] to-[#D65D56] text-white font-medium rounded-sm shadow-md hover:shadow-lg hover:brightness-105 transition-all active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed min-w-[140px]"
+                >
+                    {isLoading ? <Spinner size="sm" /> : (
+                        <>
+                            <PaperPlaneIcon />
+                            <span className="tracking-wide">启动</span>
+                        </>
+                    )}
+                </button>
             </form>
-        </Card>
+            {error && <p className="text-red-500 text-sm mt-2 ml-1">{error}</p>}
+        </div>
     );
 };
