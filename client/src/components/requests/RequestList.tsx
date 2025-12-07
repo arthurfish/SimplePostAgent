@@ -2,6 +2,7 @@
 import { useLiveRequests } from "../../hooks/useLiveQueries";
 import { Spinner } from "../ui/Spinner";
 import { Link } from "react-router-dom";
+import type {Request} from "../../hooks/useLiveQueries";
 
 // Rotating Refresh Icon for In Progress Card
 const RefreshIcon = () => (
@@ -14,7 +15,7 @@ const getCardStyles = (status: string) => {
     const s = status.toLowerCase();
     if (s === 'completed') {
         return {
-            gradient: 'bg-gradient-to-br from-[#6AC6BD] to-[#439E98]',
+            gradient: 'bg-gradient-to-br from-[#1b6550] to-[#45938C]',
             textColor: 'text-white',
             subTextColor: 'text-white/90',
             tabs: (
@@ -29,8 +30,8 @@ const getCardStyles = (status: string) => {
             subTextColor: 'text-white/90',
             tabs: (
                 <>
-                    <div className="absolute top-10 -left-1.5 w-3 h-16 bg-[#993333] rounded-l-sm z-0"></div>
-                    <div className="absolute bottom-10 -right-1.5 w-3 h-16 bg-[#993333] rounded-r-sm z-0"></div>
+                    <div className="absolute top-10 -left-1.5 w-3 h-16 bg-[#993333]  z-0"></div>
+                    <div className="absolute bottom-10 -right-1.5 w-3 h-16 bg-[#993333] z-0"></div>
                     {/* Floating Orange Icon Box */}
                     <div className="absolute -top-8 -right-6 bg-[#F5A549] w-16 h-16 flex items-center justify-center shadow-lg rounded-sm z-20">
                         <RefreshIcon />
@@ -53,17 +54,25 @@ const getCardStyles = (status: string) => {
     };
 };
 
-const TaskCard = ({ req, index }: { req: any; index: number }) => {
+const TaskCard = ({ req, index }: { req: Request; index: number }) => {
     const { gradient, textColor, subTextColor, tabs } = getCardStyles(req.status);
     // Mimic the task IDs from the image (001, 002, etc)
-    const displayId = String(index + 1).padStart(3, '0');
+    const displayId = String(index + 1).padStart(2, '0');
 
-    // Formatting Status text
-    const displayStatus = req.status === 'in_progress' ? 'In Progress' :
-        req.status.charAt(0).toUpperCase() + req.status.slice(1);
+    const statusMap: { [key: string]: string } = {
+        "completed": "已完成",
+        "failed": "失败",
+        "aggregating": "汇聚结果",
+        "pending": "正在提交",
+        "processing": "处理中",
+    };
+
+// 通过查找表直接获取显示状态
+// 如果 req.status 可能是一个不在映射中的值，可以提供一个默认值，例如："未知状态"
+    const displayStatus = statusMap[req.status] || "未知状态";
 
     return (
-        <Link to={`/request/${req.id}`} className="relative block group min-h-[180px] w-full max-w-[360px]">
+        <Link to={`/request/${req.id}`} className="relative block group min-h-[180px] w-full max-w-[360px] hover:brightness-120">
             {tabs}
             <div className={`relative h-full p-8 shadow-xl flex flex-col justify-center transition-transform transform group-hover:-translate-y-1 duration-200 z-10 ${gradient}`}>
                 <h3 className={`text-2xl font-bold mb-2 ${textColor}`}>任务 #{displayId}</h3>
@@ -95,17 +104,9 @@ export const RequestList = () => {
     if (isLoading) return <div className="p-10"><Spinner /></div>;
     if (error) return <p className="text-red-500">Error loading tasks.</p>;
 
-    // For design fidelity, if no requests, we simulate dummy data to match the screenshot
-    // In a real app, you would just map the `requests`
-    const itemsToRender = requests.length > 0 ? requests : [
-        { id: 1, status: 'completed' },
-        { id: 2, status: 'in_progress' },
-        { id: 3, status: 'pending' },
-    ];
-
     return (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-16 w-full max-w-[800px]">
-            {requests.map((req: any, i: number) => (
+            {requests.map((req: Request, i: number) => (
                 <TaskCard key={req.id || i} req={req} index={i} />
             ))}
 

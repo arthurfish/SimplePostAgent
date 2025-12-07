@@ -36,9 +36,9 @@ export const LoginPage = () => {
 
             {/* 2. 背景装饰性色块 (使用绝对定位和z-index置于底层) */}
             <div className="absolute -z-0">
-                <div className="absolute top-[-350px] left-[-300px] w-120 h-90 bg-[#2A6F6D] transform"></div>
-                <div className="absolute top-[-70px] left-[-270px] w-80 h-60 bg-[#F07F3C] transform"></div>
-                <div className="absolute top-[-270px] left-[70px] w-96 h-96 bg-[#1E496D] transform "></div>
+                <div className="absolute top-[-350px] left-[-300px] w-120 h-90 bg-[#2A6F6D] mix-blend-overlay transform"></div>
+                <div className="absolute top-[-70px] left-[-270px] w-80 h-60 bg-[#F07F3C] mix-blend-overlay transform"></div>
+                <div className="absolute top-[-270px] left-[70px] w-96 h-96 bg-[#1E496D] transform mix-blend-overlay "></div>
             </div>
 
             {/* 3. 登录卡片: 增加 z-index 使其浮于背景之上，并调整了内边距、宽度和阴影 */}

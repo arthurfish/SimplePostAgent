@@ -33,7 +33,7 @@ export const NewRequestForm = () => {
     };
 
     return (
-        <div className="w-full max-w-[650px]">
+        <div className="w-full max-w-[750px]">
             <form onSubmit={handleSubmit} className="flex items-stretch gap-4">
                 <input
                     type="text"
@@ -41,12 +41,12 @@ export const NewRequestForm = () => {
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     disabled={isLoading}
-                    className="flex-grow p-4 text-[#888] bg-[#E8E8E8] rounded-sm placeholder:text-[#AFAFAF] focus:outline-none focus:ring-1 focus:ring-gray-300 shadow-sm text-lg"
+                    className="flex-grow p-4 text-[#888] bg-[#E8E8E8] rounded-sm placeholder:text-[#AFAFAF] focus:outline-none focus:ring-1 focus:ring-gray-300 shadow-sm text-lg "
                 />
                 <button
                     type="submit"
                     disabled={isLoading}
-                    className="flex items-center justify-center gap-2 px-8 bg-gradient-to-br from-[#E58C84] to-[#D65D56] text-white font-medium rounded-sm shadow-md hover:shadow-lg hover:brightness-105 transition-all active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed min-w-[140px]"
+                    className="flex items-center justify-center gap-2 px-8 bg-gradient-to-br from-[#E58C84] to-[#D65D56] text-white font-medium rounded-sm shadow-md hover:shadow-lg hover:brightness-110 transition-all active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed min-w-[140px]"
                 >
                     {isLoading ? <Spinner size="sm" /> : (
                         <>

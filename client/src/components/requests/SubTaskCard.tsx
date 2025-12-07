@@ -42,7 +42,7 @@ export const SubTaskCard = ({ task, index }: { task: any, index: number }) => {
         // 这里的 h-[200px] 必须是固定的或者是 min-h，用来在 Grid 里占座。
         // relative 是为了给内部的 absolute 元素提供定位基准。
         // z-index: hover 时设为 50，保证展开时压在其他卡片上面。
-        <div className="relative h-[200px] w-full group z-0 hover:z-50">
+        <div className="relative h-[200px] w-min-[250px] w-full group z-0 hover:z-50 ">
 
             {/* --- 核心改动 2: 绝对定位的卡片真身 --- */}
             <div
@@ -83,7 +83,7 @@ export const SubTaskCard = ({ task, index }: { task: any, index: number }) => {
 
                 {/* 展开内容区 (悬浮时显示) */}
                 {/* 使用 opacity 和 max-height 做过渡，比 grid 方案在 absolute 下更稳定 */}
-                <div className="px-6 pb-6 pt-2 opacity-0 max-h-0 group-hover:opacity-100 group-hover:max-h-[800px] group-hover:overflow-y-scroll transition-all duration-500 delay-75 overflow-hidden flex flex-col gap-4">
+                <div className="px-6 pb-6 pt-2 opacity-0 max-h-0 group-hover:opacity-100 group-hover:max-h-[800px] group-hover:overflow-y-scroll transition-all duration-500 delay-75 overflow-hidden flex flex-col gap-4 [mask-image:linear-gradient(to_bottom,black_90%,transparent_100%)]">
 
                     {/* Prompt Box */}
                     <div className="bg-[#EBEBEB] rounded p-3 shadow-inner relative mt-2">

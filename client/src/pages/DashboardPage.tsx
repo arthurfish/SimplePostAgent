@@ -11,11 +11,11 @@ const SparkleIcon = () => (
 
 export const DashboardPage = () => {
     return (
-        <div className="flex min-h-screen bg-[#CED3DF] font-sans">
+        <div className="flex justify-center min-w-screen min-h-screen font-sans bg-gradient-to-br from-[#bfcfe5] to-[#b2d3c1] ">
         <Sidebar/>
 
             {/* Main Content */}
-            <main className="flex-grow p-12 relative overflow-hidden">
+            <main className="flex p-12 relative overflow-hidden">
                 <div className="max-w-4xl  relative z-10 space-y-16">
 
                     {/* Header Section */}
@@ -27,14 +27,14 @@ export const DashboardPage = () => {
                         <div className="absolute top-[130px] left-[380px] w-8 h-32 bg-[#3F435E] -z-10 shadow-lg"></div>
 
                         {/* Main Green Card */}
-                        <div className="w-[380px] h-[340px] bg-gradient-to-br from-[#1E655D] to-[#45938C] rounded-sm shadow-2xl flex flex-col justify-center px-10 relative z-10">
+                        <div className="w-[380px] h-[260px] bg-gradient-to-br from-[#1b6550] to-[#45938C] shadow-2xl flex flex-col justify-center px-10 z-10">
                             <h1 className="text-5xl font-extrabold text-[#0a1f1b] opacity-90 leading-tight">
                                 LLM任务并发<br/>控制台
                             </h1>
                         </div>
                     </div>
 
-                    <div className="space-y-10 pl-4">
+                    <div className="space-y-10 min-w-[50em] pl-4">
                         <NewRequestForm />
                         <RequestList />
                     </div>
